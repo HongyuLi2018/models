@@ -83,7 +83,8 @@ def prepare_batch_input(insts, args):
 
         start_label = _get_label(insts['start_id'][i], p_len)
         end_label = _get_label(insts['end_id'][i], p_len)
-        new_inst = [q_ids, start_label, end_label, p_ids, q_id]
+        para_label = _get_label(insts['ans_para_id'][i], insts['passage_num'][i])
+        new_inst = [q_ids, start_label, end_label, para_label, p_ids, q_id]
         new_insts.append(new_inst)
     return new_insts
 
@@ -202,7 +203,7 @@ def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
     return best_answer, best_span
 
 
-def validation(inference_program, avg_cost, s_probs, e_probs, match, feed_order,
+def validation(inference_program, avg_cost, s_probs, e_probs, v_scores, match, feed_order,
                place, dev_count, vocab, brc_data, logger, args):
     """
         
@@ -353,7 +354,7 @@ def train(logger, args):
         startup_prog.random_seed = args.random_seed
     with fluid.program_guard(main_program, startup_prog):
         with fluid.unique_name.guard():
-            avg_cost, s_probs, e_probs, match, feed_order = rc_model.rc_model(
+            avg_cost, s_probs, e_probs, v_scores, match, feed_order = rc_model.rc_model(
                 args.hidden_size, vocab, args)
             # clone from default main program and use it as the validation program
             inference_program = main_program.clone(for_test=True)
@@ -439,7 +440,7 @@ def train(logger, args):
                     if args.dev_interval > 0 and batch_id % args.dev_interval == 0:
                         if brc_data.dev_set is not None:
                             eval_loss, bleu_rouge = validation(
-                                inference_program, avg_cost, s_probs, e_probs,
+                                inference_program, avg_cost, s_probs, e_probs, v_scores,
                                 match, feed_order, place, dev_count, vocab,
                                 brc_data, logger, args)
                             logger.info('Dev eval loss {}'.format(eval_loss))
@@ -453,7 +454,7 @@ def train(logger, args):
                     pass_id))
                 if brc_data.dev_set is not None:
                     eval_loss, bleu_rouge = validation(
-                        inference_program, avg_cost, s_probs, e_probs, match,
+                        inference_program, avg_cost, s_probs, e_probs, v_scores, match,
                         feed_order, place, dev_count, vocab, brc_data, logger,
                         args)
                     logger.info('Dev eval loss {}'.format(eval_loss))
@@ -501,7 +502,7 @@ def evaluate(logger, args):
     startup_prog = fluid.Program()
     with fluid.program_guard(main_program, startup_prog):
         with fluid.unique_name.guard():
-            avg_cost, s_probs, e_probs, match, feed_order = rc_model.rc_model(
+            avg_cost, s_probs, e_probs, v_scores, match, feed_order = rc_model.rc_model(
                 args.hidden_size, vocab, args)
             # initialize parameters
             if not args.use_gpu:
@@ -523,7 +524,7 @@ def evaluate(logger, args):
 
             inference_program = main_program.clone(for_test=True)
             eval_loss, bleu_rouge = validation(
-                inference_program, avg_cost, s_probs, e_probs, feed_order,
+                inference_program, avg_cost, s_probs, e_probs, v_scores, match, feed_order,
                 place, dev_count, vocab, brc_data, logger, args)
             logger.info('Dev eval loss {}'.format(eval_loss))
             logger.info('Dev eval result: {}'.format(bleu_rouge))
@@ -548,7 +549,7 @@ def predict(logger, args):
     startup_prog = fluid.Program()
     with fluid.program_guard(main_program, startup_prog):
         with fluid.unique_name.guard():
-            avg_cost, s_probs, e_probs, match, feed_order = rc_model.rc_model(
+            avg_cost, s_probs, e_probs, v_scores, match, feed_order = rc_model.rc_model(
                 args.hidden_size, vocab, args)
             # initialize parameters
             if not args.use_gpu:
@@ -570,7 +571,7 @@ def predict(logger, args):
 
             inference_program = main_program.clone(for_test=True)
             eval_loss, bleu_rouge = validation(
-                inference_program, avg_cost, s_probs, e_probs, match,
+                inference_program, avg_cost, s_probs, e_probs, v_scores, match,
                 feed_order, place, dev_count, vocab, brc_data, logger, args)
 
 

@@ -134,6 +134,7 @@ class BRCDataset(object):
             'passage_length': [],
             'start_id': [],
             'end_id': [],
+            'ans_para_id': [],
             'passage_num': []
         }
         max_passage_num = max(
@@ -166,10 +167,12 @@ class BRCDataset(object):
                 end_id = min(sample['answer_spans'][0][1], self.max_p_len)
                 batch_data['start_id'].append(gold_passage_offset + start_id)
                 batch_data['end_id'].append(gold_passage_offset + end_id)
+                batch_data['ans_para_id'].append(sample['answer_passages'][0])
             else:
                 # fake span for some samples, only valid for testing
                 batch_data['start_id'].append(0)
                 batch_data['end_id'].append(0)
+                batch_data['ans_para_id'].append(0)
         return batch_data
 
     def word_iter(self, set_name=None):
