@@ -172,7 +172,7 @@ def find_best_answer_for_passage(start_probs, end_probs, passage_len):
     return (best_start, best_end), max_prob
 
 
-def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
+def find_best_answer_for_inst(sample, start_prob, end_prob, verify_score, inst_lod):
     """
     Finds the best answer for a sample given start_prob and end_prob for each position.
     This will call find_best_answer_for_passage because there are multiple passages in a sample
@@ -191,6 +191,7 @@ def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
         answer_span, score = find_best_answer_for_passage(
             start_prob[passage_start:passage_end],
             end_prob[passage_start:passage_end], passage_len)
+        score *= verify_score[p_idx][0]
         if score > best_score:
             best_score = score
             best_p_idx = p_idx
@@ -233,12 +234,13 @@ def validation(inference_program, avg_cost, s_probs, e_probs, v_scores, match, f
         feed_data = batch_reader(batch_list, args)
         val_fetch_outs = parallel_executor.run(
             feed=list(val_feeder.feed_parallel(feed_data, dev_count)),
-            fetch_list=[avg_cost.name, s_probs.name, e_probs.name, match.name],
+            fetch_list=[avg_cost.name, s_probs.name, e_probs.name, v_scores.name, match.name],
             return_numpy=False)
         total_loss += np.array(val_fetch_outs[0]).sum()
         start_probs_m = LodTensor_Array(val_fetch_outs[1])
         end_probs_m = LodTensor_Array(val_fetch_outs[2])
-        match_lod = val_fetch_outs[3].lod()
+        verify_score_m = LodTensor_Array(val_fetch_outs[3])
+        match_lod = val_fetch_outs[4].lod()
         count += len(np.array(val_fetch_outs[0]))
 
         n_batch_cnt += len(np.array(val_fetch_outs[0]))
@@ -262,13 +264,15 @@ def validation(inference_program, avg_cost, s_probs, e_probs, v_scores, match, f
                                              batch_size + 1]
             end_prob_batch = end_probs_m[batch_offset:batch_offset + batch_size
                                          + 1]
-            for sample, start_prob_inst, end_prob_inst, inst_range in zip(
-                    batch['raw_data'], start_prob_batch, end_prob_batch,
+            verify_score_batch = verify_score_m[batch_offset:batch_offset + batch_size
+                                         + 1]
+            for sample, start_prob_inst, end_prob_inst, verify_score_inst, inst_range in zip(
+                    batch['raw_data'], start_prob_batch, end_prob_batch, verify_score_batch,
                     batch_lod):
                 #one instance
                 inst_lod = match_lod[1][inst_range[0]:inst_range[1] + 1]
                 best_answer, best_span = find_best_answer_for_inst(
-                    sample, start_prob_inst, end_prob_inst, inst_lod)
+                    sample, start_prob_inst, end_prob_inst, verify_score_inst, inst_lod)
                 pred = {
                     'question_id': sample['question_id'],
                     'question_type': sample['question_type'],
