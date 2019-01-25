@@ -265,18 +265,27 @@ def fusion(g, args):
 
 
 def summ(vectors, hidden_size, args, init=None):
+    tag = 'summ:'
     d_vectors = dropout(vectors, args)
     if init is None:
-        s0 = layers.fc(d_vectors, hidden_size, act="tanh")
+        s0 = layers.fc(d_vectors, hidden_size, act=None,
+                       param_attr=fluid.ParamAttr(name=tag + 's0_w'),
+                       bias_attr=fluid.ParamAttr(name=tag + 's0_b'))
+        s0 = layers.tanh(s0)
     else:
-        s0 = layers.fc(d_vectors, hidden_size, act="tanh") 
+        s0 = layers.fc(d_vectors, hidden_size, act=None,
+                       param_attr=fluid.ParamAttr(name=tag + 's0_w'),
+                       bias_attr=fluid.ParamAttr(name=tag + 's0_b'))
         init = layers.sequence_expand_as(init, s0)
         d_init = dropout(init, args)
-        d_init = layers.fc(d_init, hidden_size, act="tanh")
-        s0 = s0 + d_init
+        d_init = layers.fc(d_init, hidden_size, act=None,
+                           param_attr=fluid.ParamAttr(name=tag + 's1_w'),
+                           bias_attr=fluid.ParamAttr(name=tag + 's1_b'))
+        s0 = layers.tanh(s0 + d_init)
         # layers.Print(s0, message='s0', summarize=10)
         # layers.Print(d_init, message='d_init', summarize=10)
-    logits = layers.fc(s0, 1, bias_attr=False)
+    logits = layers.fc(s0, 1, bias_attr=False,
+                       param_attr=fluid.ParamAttr(name=tag + 's_w'))
     scores = layers.sequence_softmax(logits)
     pooled_vec = layers.elementwise_mul(x=vectors, y=scores, axis=0)
     pooled_vec = layers.sequence_pool(input=pooled_vec, pool_type='sum')
@@ -284,16 +293,16 @@ def summ(vectors, hidden_size, args, init=None):
 
 
 def verify(p_summs, args):
+    tag = 'verify:'
     p_summs = dropout(p_summs, args)
     drnn = layers.DynamicRNN()
     with drnn.block():
         p_cur = drnn.step_input(p_summs)
         p_all = drnn.static_input(p_summs)
         p_expd = layers.sequence_expand(x=p_cur, y=p_all)
-        # dot prodoction
+        # dot production
         s_t_mul = layers.elementwise_mul(x=p_all, y=p_expd, axis=0)
         s_t_sum = layers.reduce_sum(input=s_t_mul, dim=1, keep_dim=True)
-        # TODO: how to remove self dot terms
         att_scores = layers.sequence_softmax(input=s_t_sum)
         # attention pooling
         att_vec = layers.sequence_pool(
@@ -301,7 +310,9 @@ def verify(p_summs, args):
         )
         cross_vec = layers.elementwise_mul(x=p_cur, y=att_vec, axis=0)
         p_reps = layers.concat(input=[p_cur, att_vec, cross_vec], axis=1)
-        verify_logit = layers.fc(p_reps, 1, act="tanh")
+        verify_logit = layers.fc(p_reps, 1, act="tanh",
+                                 param_attr=fluid.ParamAttr(name=tag + 'w'),
+                                 bias_attr=fluid.ParamAttr(name=tag + 'b'))
         drnn.output(verify_logit)
     verify_logits = drnn()
     verify_scores = layers.sequence_softmax(input=verify_logits)
