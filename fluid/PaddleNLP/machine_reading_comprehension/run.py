@@ -171,7 +171,8 @@ def find_best_answer_for_passage(start_probs, end_probs, passage_len):
     return (best_start, best_end), max_prob
 
 
-def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
+def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod,
+                              para_prior_scores=[0.44, 0.23, 0.15, 0.09, 0.07]):
     """
     Finds the best answer for a sample given start_prob and end_prob for each position.
     This will call find_best_answer_for_passage because there are multiple passages in a sample
@@ -190,6 +191,10 @@ def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
         answer_span, score = find_best_answer_for_passage(
             start_prob[passage_start:passage_end],
             end_prob[passage_start:passage_end], passage_len)
+        if para_prior_scores is not None:
+            # the Nth prior score = the Number of training samples in which the gold answer is
+            #  from the Nth paragraph / the number of all the training samples
+            score *= para_prior_scores[p_idx]
         if score > best_score:
             best_score = score
             best_p_idx = p_idx
