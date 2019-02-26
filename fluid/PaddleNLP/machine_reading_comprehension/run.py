@@ -79,11 +79,15 @@ def prepare_batch_input(insts, args):
             ret = [0.0] * ref_len
             if idx >= 0 and idx < ref_len:
                 ret[idx] = 1.0
+            if isinstance(idx, list):
+                for i in idx:
+                    ret[i] = 1.0
             return [[x] for x in ret]
 
         start_label = _get_label(insts['start_id'][i], p_len)
         end_label = _get_label(insts['end_id'][i], p_len)
-        new_inst = [q_ids, start_label, end_label, p_ids, q_id]
+        para_label = _get_label(insts['ans_para_id'][i], insts['passage_num'][i])
+        new_inst = [q_ids, start_label, end_label, para_label, p_ids, q_id]
         new_insts.append(new_inst)
     return new_insts
 
@@ -171,7 +175,7 @@ def find_best_answer_for_passage(start_probs, end_probs, passage_len):
     return (best_start, best_end), max_prob
 
 
-def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
+def find_best_answer_for_inst(sample, start_prob, end_prob, verify_score, inst_lod):
     """
     Finds the best answer for a sample given start_prob and end_prob for each position.
     This will call find_best_answer_for_passage because there are multiple passages in a sample
@@ -190,6 +194,7 @@ def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
         answer_span, score = find_best_answer_for_passage(
             start_prob[passage_start:passage_end],
             end_prob[passage_start:passage_end], passage_len)
+        score *= verify_score[p_idx][0]
         if score > best_score:
             best_score = score
             best_p_idx = p_idx
@@ -202,7 +207,7 @@ def find_best_answer_for_inst(sample, start_prob, end_prob, inst_lod):
     return best_answer, best_span
 
 
-def validation(inference_program, avg_cost, s_probs, e_probs, match, feed_order,
+def validation(inference_program, avg_cost, s_probs, e_probs, v_scores, match, feed_order,
                place, dev_count, vocab, brc_data, logger, args):
     """
         
@@ -232,12 +237,13 @@ def validation(inference_program, avg_cost, s_probs, e_probs, match, feed_order,
         feed_data = batch_reader(batch_list, args)
         val_fetch_outs = parallel_executor.run(
             feed=list(val_feeder.feed_parallel(feed_data, dev_count)),
-            fetch_list=[avg_cost.name, s_probs.name, e_probs.name, match.name],
+            fetch_list=[avg_cost.name, s_probs.name, e_probs.name, v_scores.name, match.name],
             return_numpy=False)
         total_loss += np.array(val_fetch_outs[0]).sum()
         start_probs_m = LodTensor_Array(val_fetch_outs[1])
         end_probs_m = LodTensor_Array(val_fetch_outs[2])
-        match_lod = val_fetch_outs[3].lod()
+        verify_score_m = LodTensor_Array(val_fetch_outs[3])
+        match_lod = val_fetch_outs[4].lod()
         count += len(np.array(val_fetch_outs[0]))
 
         n_batch_cnt += len(np.array(val_fetch_outs[0]))
@@ -261,13 +267,15 @@ def validation(inference_program, avg_cost, s_probs, e_probs, match, feed_order,
                                              batch_size + 1]
             end_prob_batch = end_probs_m[batch_offset:batch_offset + batch_size
                                          + 1]
-            for sample, start_prob_inst, end_prob_inst, inst_range in zip(
-                    batch['raw_data'], start_prob_batch, end_prob_batch,
+            verify_score_batch = verify_score_m[batch_offset:batch_offset + batch_size
+                                         + 1]
+            for sample, start_prob_inst, end_prob_inst, verify_score_inst, inst_range in zip(
+                    batch['raw_data'], start_prob_batch, end_prob_batch, verify_score_batch,
                     batch_lod):
                 #one instance
                 inst_lod = match_lod[1][inst_range[0]:inst_range[1] + 1]
                 best_answer, best_span = find_best_answer_for_inst(
-                    sample, start_prob_inst, end_prob_inst, inst_lod)
+                    sample, start_prob_inst, end_prob_inst, verify_score_inst, inst_lod)
                 pred = {
                     'question_id': sample['question_id'],
                     'question_type': sample['question_type'],
@@ -353,7 +361,7 @@ def train(logger, args):
         startup_prog.random_seed = args.random_seed
     with fluid.program_guard(main_program, startup_prog):
         with fluid.unique_name.guard():
-            avg_cost, s_probs, e_probs, match, feed_order = rc_model.rc_model(
+            avg_cost, s_probs, e_probs, v_scores, match, feed_order = rc_model.rc_model(
                 args.hidden_size, vocab, args)
             # clone from default main program and use it as the validation program
             inference_program = main_program.clone(for_test=True)
@@ -439,7 +447,7 @@ def train(logger, args):
                     if args.dev_interval > 0 and batch_id % args.dev_interval == 0:
                         if brc_data.dev_set is not None:
                             eval_loss, bleu_rouge = validation(
-                                inference_program, avg_cost, s_probs, e_probs,
+                                inference_program, avg_cost, s_probs, e_probs, v_scores,
                                 match, feed_order, place, dev_count, vocab,
                                 brc_data, logger, args)
                             logger.info('Dev eval loss {}'.format(eval_loss))
@@ -453,7 +461,7 @@ def train(logger, args):
                     pass_id))
                 if brc_data.dev_set is not None:
                     eval_loss, bleu_rouge = validation(
-                        inference_program, avg_cost, s_probs, e_probs, match,
+                        inference_program, avg_cost, s_probs, e_probs, v_scores, match,
                         feed_order, place, dev_count, vocab, brc_data, logger,
                         args)
                     logger.info('Dev eval loss {}'.format(eval_loss))
@@ -501,7 +509,7 @@ def evaluate(logger, args):
     startup_prog = fluid.Program()
     with fluid.program_guard(main_program, startup_prog):
         with fluid.unique_name.guard():
-            avg_cost, s_probs, e_probs, match, feed_order = rc_model.rc_model(
+            avg_cost, s_probs, e_probs, v_scores, match, feed_order = rc_model.rc_model(
                 args.hidden_size, vocab, args)
             # initialize parameters
             if not args.use_gpu:
@@ -523,7 +531,7 @@ def evaluate(logger, args):
 
             inference_program = main_program.clone(for_test=True)
             eval_loss, bleu_rouge = validation(
-                inference_program, avg_cost, s_probs, e_probs, feed_order,
+                inference_program, avg_cost, s_probs, e_probs, v_scores, match, feed_order,
                 place, dev_count, vocab, brc_data, logger, args)
             logger.info('Dev eval loss {}'.format(eval_loss))
             logger.info('Dev eval result: {}'.format(bleu_rouge))
@@ -548,7 +556,7 @@ def predict(logger, args):
     startup_prog = fluid.Program()
     with fluid.program_guard(main_program, startup_prog):
         with fluid.unique_name.guard():
-            avg_cost, s_probs, e_probs, match, feed_order = rc_model.rc_model(
+            avg_cost, s_probs, e_probs, v_scores, match, feed_order = rc_model.rc_model(
                 args.hidden_size, vocab, args)
             # initialize parameters
             if not args.use_gpu:
@@ -570,7 +578,7 @@ def predict(logger, args):
 
             inference_program = main_program.clone(for_test=True)
             eval_loss, bleu_rouge = validation(
-                inference_program, avg_cost, s_probs, e_probs, match,
+                inference_program, avg_cost, s_probs, e_probs, v_scores, match,
                 feed_order, place, dev_count, vocab, brc_data, logger, args)
 
 

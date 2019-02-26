@@ -64,6 +64,11 @@ def parse_args():
         default=0.0001,
         help="Weight decay. (default: %(default)f)")
     parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.1,
+        help="Verify loss scale factor. (default: %(default)f)")
+    parser.add_argument(
         "--use_gpu",
         type=distutils.util.strtobool,
         default=True,

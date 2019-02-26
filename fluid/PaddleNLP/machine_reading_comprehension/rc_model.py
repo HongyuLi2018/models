@@ -264,12 +264,58 @@ def fusion(g, args):
     return dropout(m, args)
 
 
+def summ(vectors, hidden_size, args, init=None):
+    tag = 'summ:'
+    d_vectors = dropout(vectors, args)
+    if init is None:
+        s0 = layers.fc(d_vectors, hidden_size, act=None,
+                       param_attr=fluid.ParamAttr(name=tag + 's0_w'),
+                       bias_attr=fluid.ParamAttr(name=tag + 's0_b'))
+        s0 = layers.tanh(s0)
+    else:
+        s0 = layers.fc(d_vectors, hidden_size, act=None,
+                       param_attr=fluid.ParamAttr(name=tag + 's0_w'),
+                       bias_attr=fluid.ParamAttr(name=tag + 's0_b'))
+        init = layers.sequence_expand_as(init, s0)
+        d_init = dropout(init, args)
+        d_init = layers.fc(d_init, hidden_size, act=None,
+                           param_attr=fluid.ParamAttr(name=tag + 's1_w'),
+                           bias_attr=fluid.ParamAttr(name=tag + 's1_b'))
+        s0 = layers.tanh(s0 + d_init)
+        # layers.Print(s0, message='s0', summarize=10)
+        # layers.Print(d_init, message='d_init', summarize=10)
+    logits = layers.fc(s0, 1, bias_attr=False,
+                       param_attr=fluid.ParamAttr(name=tag + 's_w'))
+    scores = layers.sequence_softmax(logits)
+    pooled_vec = layers.elementwise_mul(x=vectors, y=scores, axis=0)
+    pooled_vec = layers.sequence_pool(input=pooled_vec, pool_type='sum')
+    return pooled_vec
+
+
+def verify(q_summs, p_summs, hidden_size, args):
+    tag = 'verify:'
+    q_summs = dropout(q_summs, args)
+    p_summs = dropout(p_summs, args)
+    # bilinear function
+    passages = layers.fc(p_summs, 2 * hidden_size, act=None,
+                         param_attr=fluid.ParamAttr(name=tag + 'w'),
+                         bias_attr=False)
+    pq_merged = layers.elementwise_mul(x=passages, y=q_summs, axis=0)
+    verify_logits = layers.reduce_sum(input=pq_merged, dim=1, keep_dim=True)
+    verify_scores = layers.sigmoid(verify_logits)
+    # layers.Print(verify_scores, message='verify_scores', summarize=10)
+    # layers.Print(p_summs, message='p_summs', summarize=10)
+    return verify_scores, verify_logits
+
+
 def rc_model(hidden_size, vocab, args):
     emb_shape = [vocab.size(), vocab.embed_dim]
     start_labels = layers.data(
-        name="start_lables", shape=[1], dtype='float32', lod_level=1)
+        name="start_labels", shape=[1], dtype='float32', lod_level=1)
     end_labels = layers.data(
-        name="end_lables", shape=[1], dtype='float32', lod_level=1)
+        name="end_labels", shape=[1], dtype='float32', lod_level=1)
+    para_labels = layers.data(
+        name="para_labels", shape=[1], dtype='float32', lod_level=1)
 
     # stage 1:encode 
     q_id0 = get_data('q_id0', 1, args)
@@ -292,9 +338,14 @@ def rc_model(hidden_size, vocab, args):
         g_i = attn_flow(q_enc, p_enc, p_ids_name, args)
         # stage 3:fusion
         m_i = fusion(g_i, args)
-        drnn.output(m_i, q_enc)
+        q_summ = summ(q_enc, hidden_size, args)
+        p_summ = summ(m_i, hidden_size, args)
+        # layers.Print(p_summ, message='p_summ', summarize=10)
+        drnn.output(m_i, q_enc, q_summ, p_summ)
 
-    ms, q_encs = drnn()
+    ms, q_encs, q_summs, p_summs = drnn()
+    verify_scores, verify_logits = verify(q_summs, p_summs, hidden_size, args)
+    verify_scores.persistable = True
     p_vec = layers.lod_reset(x=ms, y=start_labels)
     q_vec = layers.lod_reset(x=q_encs, y=q_id0)
 
@@ -311,10 +362,17 @@ def rc_model(hidden_size, vocab, args):
             input=end_probs, label=end_labels, soft_label=True),
         'sum')
 
+    cost_verify = layers.sequence_pool(
+        layers.sigmoid_cross_entropy_with_logits(
+            verify_logits, label=para_labels),
+        'sum')
+    
     cost0 = layers.mean(cost0)
     cost1 = layers.mean(cost1)
-    cost = cost0 + cost1
+    # layers.Print(cost_verify, message='cost_verify', summarize=32)
+    cost_verify = layers.mean(cost_verify)
+    cost = cost0 + cost1 + args.beta * cost_verify
     cost.persistable = True
 
-    feeding_list = ["q_ids", "start_lables", "end_lables", "p_ids", "q_id0"]
-    return cost, start_probs, end_probs, ms, feeding_list
+    feeding_list = ["q_ids", "start_labels", "end_labels", "para_labels", "p_ids", "q_id0"]
+    return cost, start_probs, end_probs, verify_scores, ms, feeding_list

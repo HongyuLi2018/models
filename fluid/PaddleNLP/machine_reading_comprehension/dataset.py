@@ -134,6 +134,7 @@ class BRCDataset(object):
             'passage_length': [],
             'start_id': [],
             'end_id': [],
+            'ans_para_id': [],
             'passage_num': []
         }
         max_passage_num = max(
@@ -141,6 +142,7 @@ class BRCDataset(object):
         max_passage_num = min(self.max_p_num, max_passage_num)
         for sidx, sample in enumerate(batch_data['raw_data']):
             count = 0
+            ans_para_id = []
             for pidx in range(max_passage_num):
                 if pidx < len(sample['passages']):
                     count += 1
@@ -153,11 +155,15 @@ class BRCDataset(object):
                     batch_data['passage_token_ids'].append(passage_token_ids)
                     batch_data['passage_length'].append(
                         min(len(passage_token_ids), self.max_p_len))
+                    if 'is_selected' in sample['documents'][pidx] and sample['documents'][pidx]['is_selected']:
+                        ans_para_id.append(pidx)
+            batch_data['ans_para_id'].append(ans_para_id)
             # record the start passage index of current sample
             passade_idx_offset = sum(batch_data['passage_num'])
             batch_data['passage_num'].append(count)
             gold_passage_offset = 0
-            if 'answer_passages' in sample and len(sample['answer_passages']):
+            if 'answer_passages' in sample and len(sample['answer_passages']) and \
+                    sample['answer_passages'][0] < len(sample['documents']):
                 for i in range(sample['answer_passages'][0]):
                     gold_passage_offset += len(batch_data['passage_token_ids'][
                         passade_idx_offset + i])
